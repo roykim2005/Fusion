@@ -200,7 +200,3 @@ void Kadomtsev::write_data(const std::string& filename) const {
     std::cout << "Profile data exported: " << filename << std::endl;
     */
 }
-// temperature profile, two bands of flux merges together, avg temp. it will flatten temp profile. Need both q and temp profiles, temp profile -> resistivity.
-// consider magnetic shear, porcelli
-
-// dmitry orlov - UCSD
