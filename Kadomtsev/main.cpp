@@ -17,7 +17,7 @@ int main(int argc, char* argv[]) {
 
         std::ifstream file(config_filename);
         if (!file.is_open()) {
-            throw std::runtime_error("Could not open JSON configuration file: " + config_filename);
+            throw std::runtime_error("Could not open JSON file: " + config_filename);
         }
 
         file >> config;
