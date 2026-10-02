@@ -6,6 +6,8 @@
 #include <stdexcept>
 #include <algorithm>
 #include <utility>
+#include <numbers>
+
 
 // finds r1 such that q(r1)=1
 static double q_root_wrapper(double radial_r, const Kadomtsev* model) {
@@ -17,13 +19,16 @@ static double psi_root_wrapper(double radial_r, const Kadomtsev* model) {
 }
 // imports parameters from Kadomtsev.json
 Kadomtsev::Kadomtsev(double qa_val, double pc_val, double epsa_val, double B0_val, double qc_val, int Nr_val)
-    : qa(qa_val), pc(pc_val), epsa(epsa_val), B0(B0_val), qc(qc_val), Nr(Nr_val) {
+    : qa(qa_val), pc(pc_val), epsa(epsa_val), B0(B0_val), qc(qc_val), Nr(Nr_val), Tc(2.0) {
     // sanity check
+    Tc = 2.0; // compute_profiles() comes later so just hard wired it first here
     validate_inputs();
 
     mu = qa / qc;
     // resizes arrays std::vector for Nr points for r, pre q, post q, B0, p, psi.
     allocate_memory();
+
+    compute_profiles();
 }
 
 void Kadomtsev::validate_inputs() const {
@@ -154,33 +159,35 @@ void Kadomtsev::compute_temperature_and_resistivity() {
     std::vector<double> T_mix_list;
 
     // reconnection surface counts
-    int N_reconnect = 200; 
+    int N_reconnect = 300; 
 
     // region r1 to 0
     for (int k = 0; k < N_reconnect; ++k) {
-        double r1_minus = r1 * (1.0 - static_cast<double>(k) / N_reconnect);
+        double frac = (static_cast<double>(k) + 0.5) / N_reconnect;
+        double r1_minus = r1 * frac;
         
         // finds r2_plus such that psi*(r1_minus) == psi*(r2_plus)
         double r2_plus = find_r2_outer(r1_minus);
 
-        double r_post = std::sqrt(r2_plus * r2_plus - r1_minus * r1_minus);
+        double r_post = std::sqrt(std::max(0.0, r2_plus * r2_plus - r1_minus * r1_minus));
 
         // Calculate derivative ratio dpsi/dr
         double dpsi_dr1 = std::abs(interpolate_1d(r, dpsi_star_dr, r1_minus));
         double dpsi_dr2 = std::abs(interpolate_1d(r, dpsi_star_dr, r2_plus));
-        double dr1_dr2 = (dpsi_dr1 > 1e-9) ? (dpsi_dr2 / dpsi_dr1) : 1.0;
+        double dr1_dr2 = (dpsi_dr1 > 1e-3) ? (dpsi_dr2 / dpsi_dr1) : 1.0;
 
         double T1 = interpolate_1d(r, T_pre, r1_minus);
         double T2 = interpolate_1d(r, T_pre, r2_plus);
 
         // temp relaxation
-        double T_mix = (T1 * r1_minus * dr1_dr2 + T2 * r2_plus) / (r1_minus * dr1_dr2 + r2_plus);
+        double denom = r1_minus * dr1_dr2 + r2_plus;
+        double T_mix = (denom > 1e-9) ? ((T1 * r1_minus * dr1_dr2 + T2 * r2_plus) / denom) : T1; // use average, find how q is modified after crash
 
         r_post_list.push_back(r_post);
         T_mix_list.push_back(T_mix);
     }
 
-    // for plot python plot generation, may or may not need this. currently it looks like its mapping things backwards
+    // for plot python plot generation, may or may not need this. currently it looks like its mapping things backwards, this should sort from low to high r_post
     std::vector<std::pair<double, double>> pairs(r_post_list.size());
     for (size_t i = 0; i < pairs.size(); ++i) {
         pairs[i] = {r_post_list[i], T_mix_list[i]};
@@ -192,14 +199,29 @@ void Kadomtsev::compute_temperature_and_resistivity() {
         T_mix_list[i]  = pairs[i].second;
     }
 
+    // this calculates the core temp and volume averages the temp.
+    double thermal_energy_integral = 0.0;
+    double volume_integral = 0.0;
+    for (int i = 0; i < Nr && r[i] <= r0; ++i) {
+        double dr = (i > 0) ? (r[i] - r[i-1]) : r[0];
+        thermal_energy_integral += T_pre[i] * r[i] * dr;
+        volume_integral += r[i] * dr;
+    }
+    double T_core_avg = thermal_energy_integral / volume_integral;
+
+
+    // spatial grid
     for (int i = 0; i < Nr; ++i) {
-        if (r[i] <= r0) {
-            T_post[i] = interpolate_1d(r_post_list, T_mix_list, r[i]);
+        if (r[i] <= r0) { // it was doing T_post = T_core_avg before which just averages all T_post, it didn't call r[i] <= r1 because that never happened
+            double t_interp = interpolate_1d(r_post_list, T_mix_list, r[i]);
+            double weight = r[i] / r0;
+            T_post[i] = (1.0 - weight) * T_core_avg + weight * t_interp;
         } else {
             T_post[i] = T_pre[i]; // outer
         }
 
         // new resistivity
+        double T_safe = std::max(1e-3, T_post[i]);
         eta_post[i] = 1.0e-6 * std::pow(T_post[i], -1.5);
     }
 }
@@ -210,19 +232,34 @@ void Kadomtsev::compute_profiles() {
     double dr = (1.0 - 1e-5) / (Nr - 1);
     
     // used Tc = 2 keV
-    if (Tc <= 0.0) Tc = 2.0;
-
+    if (std::isnan(mu) || std::isinf(mu) || mu <= 0.0) {
+        mu = qa / qc;
+    }
+    Tc = 2.0;
     for (int i = 0; i < Nr; ++i) {
         r[i] = 1e-5 + i * dr;
-        
-        q_pre[i] = qa * (r[i] * r[i]) / (1.0 - std::pow(1.0 - r[i] * r[i], mu));
+
+        if (i == 0) {
+            q_pre[i] = qc; 
+        } else {
+            double denom = 1.0 - std::pow(1.0 - r[i] * r[i], mu);
+            if (std::abs(denom) < 1e-12) {
+                q_pre[i] = qc;
+            } else {
+                q_pre[i] = qa * (r[i] * r[i]) / denom;
+            }
+        }
+
         p[i] = pc * std::pow(1.0 - r[i] * r[i], mu);
-        
+
+        double base_profile = std::max(1e-10, 1.0 - r[i] * r[i]);
+
         // Temperature profile
-        T_pre[i] = Tc * std::pow(1.0 - r[i] * r[i], mu);
+        T_pre[i] = Tc * std::pow(base_profile, mu); 
+        double T_eV = std::max(1.0, T_pre[i] * 1000.0); // kev to ev for resistivity
         
         // resistivity (spitzer, eta ~ T^(-3/2)), used 1e-6 ohm meter for eta_0
-        eta_pre[i] = 1e-6 * std::pow(T_pre[i], -1.5);
+        eta_pre[i] = 1e-6 * std::pow(std::max(1e-3, T_pre[i]), -1.5);
 
         // B theta
         B_theta[i] = (r[i] * B0 * epsa) / q_pre[i];
@@ -240,7 +277,6 @@ void Kadomtsev::integrate_helical_flux() {
 }
 
 void Kadomtsev::solve() {
-    compute_profiles();
     integrate_helical_flux();
 
     r1 = find_root_bisection(q_root_wrapper, r[0], r[Nr - 1]);
@@ -257,6 +293,10 @@ void Kadomtsev::solve() {
     }
     compute_temperature_and_resistivity();
     run_post_solve_sanity_checks();
+
+    std::cout << "Crash zt = " 
+              << std::fixed << std::setprecision(6) << current_time << " s (" 
+              << std::setprecision(2) << current_time * 1000.0 << " ms)" << std::endl;
 }
 
 void Kadomtsev::run_post_solve_sanity_checks() const {
@@ -281,6 +321,117 @@ void Kadomtsev::run_post_solve_sanity_checks() const {
         throw std::runtime_error("Discontinuity in q_post at r0.");
     }
 }
+
+// post crash, resets the conditions. maybe there's a better model that accounts for previous conditions 
+void Kadomtsev::reset_post_to_pre() {
+    for (int i = 0; i < Nr; ++i) {
+        T_pre[i] = T_post[i];
+        q_pre[i] = q_post[i];
+        eta_pre[i] = eta_post[i];
+
+        if (q_pre[i] > 0.0) {
+            B_theta[i] = (epsa * B0 * r[i]) / q_pre[i];
+        }
+    }
+}
+
+
+// tridiagonal matrix solver for big matrices from time dependence codes
+static std::vector<double> solve_tridiagonal(const std::vector<double>& A, const std::vector<double>& B, const std::vector<double>& C, std::vector<double> D) {
+    int N = D.size();
+    std::vector<double> c_prime(N, 0.0);
+    std::vector<double> x(N, 0.0);
+
+    c_prime[0] = C[0] / B[0];
+    D[0] = D[0] / B[0];
+
+    for (int i = 1; i < N; ++i) {
+        double m = 1.0 / (B[i] - A[i] * c_prime[i - 1]);
+        c_prime[i] = C[i] * m;
+        D[i] = (D[i] - A[i] * D[i - 1]) * m;
+    }
+
+    x[N - 1] = D[N - 1];
+    for (int i = N - 2; i >= 0; --i) {
+        x[i] = D[i] - c_prime[i] * x[i + 1];
+    }
+
+    return x;
+}
+
+
+// transport equation solver
+
+
+void Kadomtsev::step_ramp_phase(double dt) {
+    double dr = r[1] - r[0];
+    double alpha = (2.0 / 3.0) * dt * chi / (dr * dr);
+    double e_charge = 1.60217663e-19;
+
+    double mu0 = 4.0 * 3.14159265 * 1e-7;
+
+    if (n_e <= 0.0) n_e = 1.0e20; // just to make sure n_e is physical
+
+    // thomas algo
+    std::vector<double> A(Nr, 0.0), B(Nr, 0.0), C(Nr, 0.0), D(Nr, 0.0);
+
+    // Boundary at r = 0 with dT/dr = 0
+    B[0] = 1.0; 
+    C[0] = -1.0; 
+    D[0] = 0.0;
+
+    // grid points
+    for (int i = 1; i < Nr - 1; ++i) {
+        double r_minus = r[i] - 0.5 * dr;
+        double r_plus  = r[i] + 0.5 * dr;
+
+        A[i] = -0.5 * alpha * (r_minus / r[i]);
+        C[i] = -0.5 * alpha * (r_plus / r[i]);
+        B[i] = 1.0 - A[i] - C[i];
+
+        // Ohmic heating j = (1 / mu0 r) * d(r B_theta) / dr
+        double j_z = (r[i+1] * B_theta[i+1] - r[i-1] * B_theta[i-1]) / (2.0 * dr * r[i] * mu0);
+        double ohmic_heat = eta_pre[i] * j_z * j_z;
+        double e_charge_keV = 1.60217663e-16;
+
+        // diffusion 
+        double diff_explicit = 0.5 * alpha * (
+            (r_plus / r[i]) * (T_pre[i+1] - T_pre[i]) - 
+            (r_minus / r[i]) * (T_pre[i] - T_pre[i-1])
+        );
+        double dt_heat_keV = (2.0 * dt / (3.0 * n_e * e_charge * 1000.0)) * ohmic_heat;
+        // D vector
+        D[i] = T_pre[i] + diff_explicit + dt_heat_keV;
+
+    }
+
+    // Boundary at r = a - T_edge is fixed
+    B[Nr - 1] = 1.0; 
+    D[Nr - 1] = T_pre[Nr - 1];
+
+    // solves for T^(n+1)
+    T_pre = solve_tridiagonal(A, B, C, D);
+
+    // resistivity profile for new temp
+    for (int i = 0; i < Nr; ++i) {
+        double T_safe = std::max(1e-3, T_pre[i]);
+        eta_pre[i] = 1.0e-6 * std::pow(T_safe, -1.5);
+    }
+
+    double tau_R = 0.100; // 100 ms 
+    for (int i = 0; i < Nr; ++i) {
+        double q_target = qc + (qa - qc) * (r[i] * r[i]);
+        q_pre[i] += dt * (q_target - q_pre[i]) / tau_R;
+    }
+
+    for (int i = 0; i < Nr; ++i) {
+        if (q_pre[i] > 0.0) {
+            B_theta[i] = (epsa * B0 * r[i]) / q_pre[i];
+        }
+    }
+}
+
+
 
 void Kadomtsev::print_summary() const {
     double q_r0_pre = interpolate(r, q_pre, r0);
@@ -332,3 +483,7 @@ void Kadomtsev::write_data(const std::string& filename) const {
     file.close();
     std::cout << "Exported to: " << filename << std::endl;
 }
+
+
+// suggestion: first timestep, i should see something reasonable and nothing crazy. Boundary condition for triangular matrix. make sure i have bc right. 
+// near axis, do finite difference. USe crank nicholson and you end up with tridiagonal. 
