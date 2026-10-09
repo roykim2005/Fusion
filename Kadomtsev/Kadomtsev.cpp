@@ -211,19 +211,25 @@ void Kadomtsev::compute_temperature_and_resistivity() {
 
 
     // spatial grid
+    int idx_r0 = 0;
+    while (idx_r0 < Nr - 1 && r[idx_r0] < r0) {
+        idx_r0++;
+    }
+
+
     for (int i = 0; i < Nr; ++i) {
         if (r[i] <= r0) { // it was doing T_post = T_core_avg before which just averages all T_post, it didn't call r[i] <= r1 because that never happened
-            double t_interp = interpolate_1d(r_post_list, T_mix_list, r[i]);
-            double weight = r[i] / r0;
-            T_post[i] = (1.0 - weight) * T_core_avg + weight * t_interp;
+            T_post[i] = interpolate_1d(r_post_list, T_mix_list, r[i]);
         } else {
             T_post[i] = T_pre[i]; // outer
         }
+        T_post[idx_r0] = T_pre[idx_r0];
 
         // new resistivity
         double T_safe = std::max(1e-3, T_post[i]);
         eta_post[i] = 1.0e-6 * std::pow(T_post[i], -1.5);
     }
+    
 }
 
 
@@ -239,34 +245,19 @@ void Kadomtsev::compute_profiles() {
     for (int i = 0; i < Nr; ++i) {
         r[i] = 1e-5 + i * dr;
 
-        if (i == 0) {
-            q_pre[i] = qc; 
-        } else {
-            double denom = 1.0 - std::pow(1.0 - r[i] * r[i], mu);
-            if (std::abs(denom) < 1e-12) {
-                q_pre[i] = qc;
-            } else {
-                q_pre[i] = qa * (r[i] * r[i]) / denom;
-            }
-        }
+        q_pre[i] = qc + (qa - qc) * r[i] * r[i]; // q profile
+        double base_profile = std::max(0.01, 1.0 - r[i] * r[i]);
 
-        p[i] = pc * std::pow(1.0 - r[i] * r[i], mu);
-
-        double base_profile = std::max(1e-10, 1.0 - r[i] * r[i]);
-
-        // Temperature profile
-        T_pre[i] = Tc * std::pow(base_profile, mu); 
-        double T_eV = std::max(1.0, T_pre[i] * 1000.0); // kev to ev for resistivity
-        
-        // resistivity (spitzer, eta ~ T^(-3/2)), used 1e-6 ohm meter for eta_0
-        eta_pre[i] = 1e-6 * std::pow(std::max(1e-3, T_pre[i]), -1.5);
-
-        // B theta
-        B_theta[i] = (r[i] * B0 * epsa) / q_pre[i];
-        // helical flux
+        p[i] = pc * std::pow(base_profile, mu); // pressure
+        T_pre[i] = Tc * std::pow(base_profile, mu); // temp
+        double T_safe = std::max(1e-2, T_pre[i]);
+        eta_pre[i] = 1e-6 * std::pow(T_safe, -1.5); // resistivity
+        B_theta[i] = (r[i] * B0 * epsa) / q_pre[i]; // B field
         dpsi_star_dr[i] = (1.0 - q_pre[i]) * B_theta[i];
     }
 }
+
+
 // integrates d psi/dr
 void Kadomtsev::integrate_helical_flux() {
     psi_star[0] = 0.0;
@@ -366,8 +357,7 @@ static std::vector<double> solve_tridiagonal(const std::vector<double>& A, const
 void Kadomtsev::step_ramp_phase(double dt) {
     double dr = r[1] - r[0];
     double alpha = (2.0 / 3.0) * dt * chi / (dr * dr);
-    double e_charge = 1.60217663e-19;
-
+    double e_charge = 1.60217663e-16; // in keV
     double mu0 = 4.0 * 3.14159265 * 1e-7;
 
     if (n_e <= 0.0) n_e = 1.0e20; // just to make sure n_e is physical
@@ -384,47 +374,41 @@ void Kadomtsev::step_ramp_phase(double dt) {
     for (int i = 1; i < Nr - 1; ++i) {
         double r_minus = r[i] - 0.5 * dr;
         double r_plus  = r[i] + 0.5 * dr;
+        // weird because im getting ~0.48 for r_0, but d psi*/dr = B_theta(r)(1-q(r)) = [rB_0 epsa/q(0)] * (1-q(r)), 
+        // q(r) approx q_0 + q'' r^2 (parabolic) so whenever q_0 + q'' r_1^2 = 1 then d psi*/dr = [rB_0 epsa/q(0)](1-q_0)(1-(r/r_1)^2)
+        // and integrating that over r should give me some constant times [r^2/2 - r^4/(4r_1)^2] so at psi*(r_0) = psi*(0) i need r_0 = sqrt2 r_1,
+        // but my r_1 ~ 0.1085 and im not getting r_0 ~ 0.1534.
 
-        A[i] = -0.5 * alpha * (r_minus / r[i]);
-        C[i] = -0.5 * alpha * (r_plus / r[i]);
+        A[i] = -alpha * (r_minus / r[i]);
+        C[i] = -alpha * (r_plus / r[i]);
         B[i] = 1.0 - A[i] - C[i];
 
-        // Ohmic heating j = (1 / mu0 r) * d(r B_theta) / dr
-        double j_z = (r[i+1] * B_theta[i+1] - r[i-1] * B_theta[i-1]) / (2.0 * dr * r[i] * mu0);
-        double ohmic_heat = eta_pre[i] * j_z * j_z;
-        double e_charge_keV = 1.60217663e-16;
+        double j_z = (2.0 * epsa * B0) / (mu0 * q_pre[i]);
 
+        double T_safe = std::max(0.05, T_pre[i]);
+        double eta_local = 1.0e-6 * std::pow(T_safe, -1.5);
+        double ohmic_power = eta_local * j_z * j_z; // W/m^3
+
+        double dT_dt = (2.0 / (3.0 * n_e * e_charge)) * ohmic_power;
+        D[i] = T_pre[i] + dt * dT_dt;
         // diffusion 
-        double diff_explicit = 0.5 * alpha * (
-            (r_plus / r[i]) * (T_pre[i+1] - T_pre[i]) - 
-            (r_minus / r[i]) * (T_pre[i] - T_pre[i-1])
-        );
-        double dt_heat_keV = (2.0 * dt / (3.0 * n_e * e_charge * 1000.0)) * ohmic_heat;
-        // D vector
-        D[i] = T_pre[i] + diff_explicit + dt_heat_keV;
-
     }
 
     // Boundary at r = a - T_edge is fixed
     B[Nr - 1] = 1.0; 
-    D[Nr - 1] = T_pre[Nr - 1];
+    D[Nr - 1] = 0.05; // was = T_pre[Nr - 1], now its just fixed at 50 eV on the boundary
 
     // solves for T^(n+1)
     T_pre = solve_tridiagonal(A, B, C, D);
 
     // resistivity profile for new temp
+    double tau_R = 0.100;
     for (int i = 0; i < Nr; ++i) {
-        double T_safe = std::max(1e-3, T_pre[i]);
-        eta_pre[i] = 1.0e-6 * std::pow(T_safe, -1.5);
-    }
+        T_pre[i] = std::max(0.05, T_pre[i]);
+        eta_pre[i] = 1.0e-6 * std::pow(T_pre[i], -1.5);
 
-    double tau_R = 0.100; // 100 ms 
-    for (int i = 0; i < Nr; ++i) {
         double q_target = qc + (qa - qc) * (r[i] * r[i]);
         q_pre[i] += dt * (q_target - q_pre[i]) / tau_R;
-    }
-
-    for (int i = 0; i < Nr; ++i) {
         if (q_pre[i] > 0.0) {
             B_theta[i] = (epsa * B0 * r[i]) / q_pre[i];
         }
@@ -487,3 +471,5 @@ void Kadomtsev::write_data(const std::string& filename) const {
 
 // suggestion: first timestep, i should see something reasonable and nothing crazy. Boundary condition for triangular matrix. make sure i have bc right. 
 // near axis, do finite difference. USe crank nicholson and you end up with tridiagonal. 
+
+// plot T vs r and q vs r, differnt stages of crash
