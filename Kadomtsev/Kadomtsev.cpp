@@ -377,7 +377,7 @@ void Kadomtsev::step_ramp_phase(double dt) {
         // weird because im getting ~0.48 for r_0, but d psi*/dr = B_theta(r)(1-q(r)) = [rB_0 epsa/q(0)] * (1-q(r)), 
         // q(r) approx q_0 + q'' r^2 (parabolic) so whenever q_0 + q'' r_1^2 = 1 then d psi*/dr = [rB_0 epsa/q(0)](1-q_0)(1-(r/r_1)^2)
         // and integrating that over r should give me some constant times [r^2/2 - r^4/(4r_1)^2] so at psi*(r_0) = psi*(0) i need r_0 = sqrt2 r_1,
-        // but my r_1 ~ 0.1085 and im not getting r_0 ~ 0.1534.
+        // but my r_1 ~ 0.1085 and im not getting r_0 ~ 0.1534. Trying to figure out what went wrong - 10/08/2026
 
         A[i] = -alpha * (r_minus / r[i]);
         C[i] = -alpha * (r_plus / r[i]);
