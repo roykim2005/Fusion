@@ -16,6 +16,7 @@ private:
     double epsa; //  Inverse aspect ratio a/R0 
     double B0; // Toroidal magnetic field (T)
     int Nr; // radial grid resolution
+    double a; // Major radius a
     double mu; // Current profile exponent
     double chi; // Thermal diffusivity [m^2/s]
     double n_e; // Electron density [m^-3]
@@ -50,7 +51,7 @@ private:
     void compute_temperature_and_resistivity();
 
 public:
-    Kadomtsev(double qa_val, double pc_val, double epsa_val, double B0_val, double qc_val, int Nr_val);
+    Kadomtsev(double qa_val, double pc_val, double epsa_val, double B0_val, double qc_val, int Nr_val, double a_val);
 
     void solve();
     void print_summary() const;
