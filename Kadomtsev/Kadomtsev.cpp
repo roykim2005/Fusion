@@ -18,8 +18,8 @@ static double psi_root_wrapper(double radial_r, const Kadomtsev* model) {
     return model->eval_psi_diff(radial_r);
 }
 // imports parameters from Kadomtsev.json
-Kadomtsev::Kadomtsev(double qa_val, double pc_val, double epsa_val, double B0_val, double qc_val, int Nr_val)
-    : qa(qa_val), pc(pc_val), epsa(epsa_val), B0(B0_val), qc(qc_val), Nr(Nr_val), Tc(2.0) {
+Kadomtsev::Kadomtsev(double qa_val, double pc_val, double epsa_val, double B0_val, double qc_val, int Nr_val, double a_val)
+    : qa(qa_val), pc(pc_val), epsa(epsa_val), B0(B0_val), qc(qc_val), Nr(Nr_val), a(a_val), Tc(2.0) {
     // sanity check
     Tc = 2.0; // compute_profiles() comes later so just hard wired it first here
     validate_inputs();
@@ -268,6 +268,8 @@ void Kadomtsev::integrate_helical_flux() {
 }
 
 void Kadomtsev::solve() {
+    for (int i = 0; i < Nr; ++i)
+        dpsi_star_dr[i] = (1.0 - q_pre[i]) * B_theta[i]; // now it recomputes the d psi*/dr before 
     integrate_helical_flux();
 
     r1 = find_root_bisection(q_root_wrapper, r[0], r[Nr - 1]);
@@ -285,7 +287,7 @@ void Kadomtsev::solve() {
     compute_temperature_and_resistivity();
     run_post_solve_sanity_checks();
 
-    std::cout << "Crash zt = " 
+    std::cout << "Crash at t = " 
               << std::fixed << std::setprecision(6) << current_time << " s (" 
               << std::setprecision(2) << current_time * 1000.0 << " ms)" << std::endl;
 }
@@ -377,13 +379,14 @@ void Kadomtsev::step_ramp_phase(double dt) {
         // weird because im getting ~0.48 for r_0, but d psi*/dr = B_theta(r)(1-q(r)) = [rB_0 epsa/q(0)] * (1-q(r)), 
         // q(r) approx q_0 + q'' r^2 (parabolic) so whenever q_0 + q'' r_1^2 = 1 then d psi*/dr = [rB_0 epsa/q(0)](1-q_0)(1-(r/r_1)^2)
         // and integrating that over r should give me some constant times [r^2/2 - r^4/(4r_1)^2] so at psi*(r_0) = psi*(0) i need r_0 = sqrt2 r_1,
-        // but my r_1 ~ 0.1085 and im not getting r_0 ~ 0.1534. Trying to figure out what went wrong - 10/08/2026
+        // but my r_1 ~ 0.1085 and im not getting r_1 ~ 0.1534. Trying to figure out what went wrong - 10/08/2026
 
         A[i] = -alpha * (r_minus / r[i]);
         C[i] = -alpha * (r_plus / r[i]);
         B[i] = 1.0 - A[i] - C[i];
-
-        double j_z = (2.0 * epsa * B0) / (mu0 * q_pre[i]);
+        
+        double dq_dr = (q_pre[i + 1] - q_pre[i - 1]) / (2.0 * dr);
+        double j_z = (B0 * epsa / (mu0 * a)) * (2.0 / q_pre[i] - r[i] * dq_dr / (q_pre[i] * q_pre[i]));
 
         double T_safe = std::max(0.05, T_pre[i]);
         double eta_local = 1.0e-6 * std::pow(T_safe, -1.5);
