@@ -12,14 +12,13 @@ class Kadomtsev {
 private:
     double qc; // Central safety factor q_c
     double qa; // Edge safety factor (q(r) at r=a)
-    double pc; // Central kinetic pressure (Pa)
-    double epsa; //  Inverse aspect ratio a/R0 
-    double B0; // Toroidal magnetic field (T)
     int Nr; // radial grid resolution
-    double a; // Major radius a
     double mu; // Current profile exponent
-    double chi; // Thermal diffusivity [m^2/s]
-    double n_e; // Electron density [m^-3]
+    double kappa; // diffusion term, (2.0 / 3.0) * chi * t_final
+    double theta; // ohm heating term, (2.0 / 3.0) * t_final * eta_c * J_c * J_c / (n_e * e_keV * Tc);
+    double tauR_hat; // tau_R / t_final
+    double Tedge_hat; // edge tempe / Tc
+
 
     std::vector<double> r; // Normalized radial coordinate r = r/a in [0, 1]
     std::vector<double> q_pre; // Pre-crash safety factor profile q_pre(r)
@@ -35,7 +34,6 @@ private:
 
     double r1; // Resonant q=1 surface radius (r1 / a)
     double r0; // Boundary radius (r0 / a)
-    double Tc; // Central temperature (measured in keV)
     double current_time{0.0}; // for time evolution
 
 
@@ -51,7 +49,7 @@ private:
     void compute_temperature_and_resistivity();
 
 public:
-    Kadomtsev(double qa_val, double pc_val, double epsa_val, double B0_val, double qc_val, int Nr_val, double a_val);
+    Kadomtsev(double qa_val, double qc_val, int Nr_val, double kappa_val, double theta_val, double tauR_hat_val, double Tedge_hat_val);
 
     void solve();
     void print_summary() const;
