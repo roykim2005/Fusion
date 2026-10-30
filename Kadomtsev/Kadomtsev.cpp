@@ -18,25 +18,20 @@ static double psi_root_wrapper(double radial_r, const Kadomtsev* model) {
     return model->eval_psi_diff(radial_r);
 }
 // imports parameters from Kadomtsev.json
-Kadomtsev::Kadomtsev(double qa_val, double pc_val, double epsa_val, double B0_val, double qc_val, int Nr_val, double a_val)
-    : qa(qa_val), pc(pc_val), epsa(epsa_val), B0(B0_val), qc(qc_val), Nr(Nr_val), a(a_val), Tc(2.0) {
+Kadomtsev::Kadomtsev(double qa_val, double qc_val, int Nr_val, double kappa_val, double theta_val, double tauR_hat_val, double Tedge_hat_val)
+    : qc(qc_val), qa(qa_val), Nr(Nr_val), kappa(kappa_val), theta(theta_val),
+      tauR_hat(tauR_hat_val), Tedge_hat(Tedge_hat_val) {
     // sanity check
-    Tc = 2.0; // compute_profiles() comes later so just hard wired it first here
     validate_inputs();
-
     mu = qa / qc;
     // resizes arrays std::vector for Nr points for r, pre q, post q, B0, p, psi.
     allocate_memory();
-
     compute_profiles();
 }
 
 void Kadomtsev::validate_inputs() const {
     if (Nr < 100) {
         throw std::invalid_argument("Nr must be at least 100.");
-    }
-    if (B0 <= 0.0) {
-        throw std::invalid_argument("Toroidal magnetic field B0 must be positive.");
     }
     if (qa <= qc) {
         throw std::invalid_argument("Edge safety factor qa must be greater than central parameter qc.");
@@ -226,33 +221,25 @@ void Kadomtsev::compute_temperature_and_resistivity() {
         T_post[idx_r0] = T_pre[idx_r0];
 
         // new resistivity
-        double T_safe = std::max(1e-3, T_post[i]);
-        eta_post[i] = 1.0e-6 * std::pow(T_post[i], -1.5);
+        eta_post[i] = std::pow(std::max(Tedge_hat, T_post[i]), -1.5);
     }
     
 }
 
-
 // sets up a 1D grid and calculates pre crash q, pre crash p, B0, d psi/dr = (1-q(r))B0, if T = 2 keV
 void Kadomtsev::compute_profiles() {
     double dr = (1.0 - 1e-5) / (Nr - 1);
-    
-    // used Tc = 2 keV
-    if (std::isnan(mu) || std::isinf(mu) || mu <= 0.0) {
-        mu = qa / qc;
-    }
-    Tc = 2.0;
+
+    mu = qa / qc;
     for (int i = 0; i < Nr; ++i) {
         r[i] = 1e-5 + i * dr;
 
         q_pre[i] = qc + (qa - qc) * r[i] * r[i]; // q profile
         double base_profile = std::max(0.01, 1.0 - r[i] * r[i]);
-
-        p[i] = pc * std::pow(base_profile, mu); // pressure
-        T_pre[i] = Tc * std::pow(base_profile, mu); // temp
-        double T_safe = std::max(1e-2, T_pre[i]);
-        eta_pre[i] = 1e-6 * std::pow(T_safe, -1.5); // resistivity
-        B_theta[i] = (r[i] * B0 * epsa) / q_pre[i]; // B field
+        
+        T_pre[i] = std::pow(base_profile, mu); // temp, Tc is now 1
+        eta_pre[i] = std::pow(std::max(Tedge_hat, T_pre[i]), -1.5); // resistivity
+        B_theta[i] = r[i] / q_pre[i]; // B field
         dpsi_star_dr[i] = (1.0 - q_pre[i]) * B_theta[i];
     }
 }
@@ -287,9 +274,7 @@ void Kadomtsev::solve() {
     compute_temperature_and_resistivity();
     run_post_solve_sanity_checks();
 
-    std::cout << "Crash at t = " 
-              << std::fixed << std::setprecision(6) << current_time << " s (" 
-              << std::setprecision(2) << current_time * 1000.0 << " ms)" << std::endl;
+    std::cout << "Crash at t_hat = " << std::fixed << std::setprecision(6) << current_time << std::endl;
 }
 
 void Kadomtsev::run_post_solve_sanity_checks() const {
@@ -321,10 +306,7 @@ void Kadomtsev::reset_post_to_pre() {
         T_pre[i] = T_post[i];
         q_pre[i] = q_post[i];
         eta_pre[i] = eta_post[i];
-
-        if (q_pre[i] > 0.0) {
-            B_theta[i] = (epsa * B0 * r[i]) / q_pre[i];
-        }
+        B_theta[i] = r[i] / q_pre[i];
     }
 }
 
@@ -356,69 +338,44 @@ static std::vector<double> solve_tridiagonal(const std::vector<double>& A, const
 // transport equation solver
 
 
-void Kadomtsev::step_ramp_phase(double dt) {
+void Kadomtsev::step_ramp_phase(double dt) { // dt is dt hat
     double dr = r[1] - r[0];
-    double alpha = (2.0 / 3.0) * dt * chi / (dr * dr);
-    double e_charge = 1.60217663e-16; // in keV
-    double mu0 = 4.0 * 3.14159265 * 1e-7;
-
-    if (n_e <= 0.0) n_e = 1.0e20; // just to make sure n_e is physical
-
-    // thomas algo
-    std::vector<double> A(Nr, 0.0), B(Nr, 0.0), C(Nr, 0.0), D(Nr, 0.0);
-
-    // Boundary at r = 0 with dT/dr = 0
-    B[0] = 1.0; 
-    C[0] = -1.0; 
-    D[0] = 0.0;
+    double alpha = kappa * dt / (dr * dr);
+    std::vector<double> A(Nr, 0.0), B(Nr, 0.0), C(Nr, 0.0), D(Nr, 0.0); B[0] = 1.0; C[0] = -1.0; D[0] = 0.0; // dT/dr = 0 at r=0
 
     // grid points
     for (int i = 1; i < Nr - 1; ++i) {
         double r_minus = r[i] - 0.5 * dr;
         double r_plus  = r[i] + 0.5 * dr;
-        // weird because im getting ~0.48 for r_0, but d psi*/dr = B_theta(r)(1-q(r)) = [rB_0 epsa/q(0)] * (1-q(r)), 
-        // q(r) approx q_0 + q'' r^2 (parabolic) so whenever q_0 + q'' r_1^2 = 1 then d psi*/dr = [rB_0 epsa/q(0)](1-q_0)(1-(r/r_1)^2)
-        // and integrating that over r should give me some constant times [r^2/2 - r^4/(4r_1)^2] so at psi*(r_0) = psi*(0) i need r_0 = sqrt2 r_1,
-        // but my r_1 ~ 0.1085 and im not getting r_1 ~ 0.1534. Trying to figure out what went wrong - 10/08/2026
 
         A[i] = -alpha * (r_minus / r[i]);
         C[i] = -alpha * (r_plus / r[i]);
         B[i] = 1.0 - A[i] - C[i];
         
         double dq_dr = (q_pre[i + 1] - q_pre[i - 1]) / (2.0 * dr);
-        double j_z = (B0 * epsa / (mu0 * a)) * (2.0 / q_pre[i] - r[i] * dq_dr / (q_pre[i] * q_pre[i]));
+        double j_hat = (2.0 - r[i] * dq_dr / q_pre[i]) / q_pre[i];
+        double eta_hat = std::pow(std::max(Tedge_hat, T_pre[i]), -1.5);
 
-        double T_safe = std::max(0.05, T_pre[i]);
-        double eta_local = 1.0e-6 * std::pow(T_safe, -1.5);
-        double ohmic_power = eta_local * j_z * j_z; // W/m^3
-
-        double dT_dt = (2.0 / (3.0 * n_e * e_charge)) * ohmic_power;
-        D[i] = T_pre[i] + dt * dT_dt;
+        D[i] = T_pre[i] + dt * theta * eta_hat * j_hat * j_hat;
         // diffusion 
     }
 
     // Boundary at r = a - T_edge is fixed
     B[Nr - 1] = 1.0; 
-    D[Nr - 1] = 0.05; // was = T_pre[Nr - 1], now its just fixed at 50 eV on the boundary
+    D[Nr - 1] = Tedge_hat; 
 
     // solves for T^(n+1)
     T_pre = solve_tridiagonal(A, B, C, D);
 
     // resistivity profile for new temp
-    double tau_R = 0.100;
     for (int i = 0; i < Nr; ++i) {
-        T_pre[i] = std::max(0.05, T_pre[i]);
-        eta_pre[i] = 1.0e-6 * std::pow(T_pre[i], -1.5);
-
-        double q_target = qc + (qa - qc) * (r[i] * r[i]);
-        q_pre[i] += dt * (q_target - q_pre[i]) / tau_R;
-        if (q_pre[i] > 0.0) {
-            B_theta[i] = (epsa * B0 * r[i]) / q_pre[i];
-        }
+        T_pre[i] = std::max(Tedge_hat, T_pre[i]);
+        eta_pre[i] = std::pow(T_pre[i], -1.5);
+        double q_target = qc + (qa - qc) * r[i] * r[i];
+        q_pre[i] += dt * (q_target - q_pre[i]) / tauR_hat;
+        B_theta[i] = r[i] / q_pre[i];
     }
 }
-
-
 
 void Kadomtsev::print_summary() const {
     double q_r0_pre = interpolate(r, q_pre, r0);
@@ -437,14 +394,14 @@ void Kadomtsev::print_summary() const {
     std::cout << "q(r0) - pre-crash: " << q_r0_pre << ", post-crash: " << q_r0_post << "\n";
     std::cout << "============================================================== \n"; 
 
-    std::cout << "T(0) - pre-crash: " << T_pre[0] << " keV, post-crash: " << T_post[0] << " keV\n";
-    std::cout << "T(r1/2) - pre-crash: " << interpolate(r, T_pre, r1/2.0) << " keV, post-crash: " << interpolate(r, T_post, r1/2.0) << " keV\n";
+    std::cout << "T_hat(0) - pre-crash: " << T_pre[0] << ", post-crash: " << T_post[0] << " \n";
+    std::cout << "T_hat(r1/2) - pre-crash: " << interpolate(r, T_pre, r1/2.0) << ", post-crash: " << interpolate(r, T_post, r1/2.0) << "\n";
     // T(r1) post is the temp after merging
-    std::cout << "T(r1) - pre-crash: " << interpolate(r, T_pre, r1) << " keV, post-crash: " << interpolate(r, T_post, r1) << " keV\n";
-    std::cout << "T(r0) - pre-crash: " << interpolate(r, T_pre, r0) << " keV, post-crash: " << interpolate(r, T_post, r0) << " keV\n\n";
+    std::cout << "T_hat(r1) - pre-crash: " << interpolate(r, T_pre, r1) << ", post-crash: " << interpolate(r, T_post, r1) << "\n";
+    std::cout << "T_hat(r0) - pre-crash: " << interpolate(r, T_pre, r0) << ", post-crash: " << interpolate(r, T_post, r0) << "\n";
     std::cout << std::scientific << std::setprecision(3);
-    std::cout << "eta(0) - pre-crash: " << eta_pre[0] << " Ohm m, post-crash: " << eta_post[0] << " Ohm m\n";
-    std::cout << "eta(r1) - pre-crash: " << interpolate(r, eta_pre, r1) << " Ohm m, post-crash: " << interpolate(r, eta_post, r1) << " Ohm m\n";
+    std::cout << "eta_hat(0) - pre-crash: " << eta_pre[0] << ", post-crash: " << eta_post[0] << "\n";
+    std::cout << "eta_hat(r1) - pre-crash: " << interpolate(r, eta_pre, r1) << ", post-crash: " << interpolate(r, eta_post, r1) << "\n";
 }
 
 
@@ -452,7 +409,7 @@ void Kadomtsev::print_summary() const {
 void Kadomtsev::write_data(const std::string& filename) const {
     std::ofstream file(filename);
 
-    file << "# r/a\tq_pre\tq_post\tT_pre\tT_post\teta_pre\teta_post\tpsi_star\n";
+    file << "# r/a\tq_pre\tq_post\tT_pre/Tc\tT_post/Tc\teta_pre/eta_c\teta_post/eta_c\tpsi_star\n";
 
     file << std::scientific << std::setprecision(6);
 
@@ -476,3 +433,5 @@ void Kadomtsev::write_data(const std::string& filename) const {
 // near axis, do finite difference. USe crank nicholson and you end up with tridiagonal. 
 
 // plot T vs r and q vs r, differnt stages of crash
+
+// timestep too small, not enough for time evolutions. NORMALIZE EVERYTHING! for timesteps, want D to be 1. 
