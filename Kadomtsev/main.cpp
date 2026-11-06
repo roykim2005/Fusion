@@ -23,7 +23,8 @@ int main(int argc, char* argv[]) {
 
         file >> config;
         double Z = config.value("Z", 2.0);
-        double chi0 = config.value("chi0", 4.0);
+        double chi0 = config.value("chi0", 1.0);
+        double c_th = config.value("c_th", 3.0);
         double qa = config["qa"].get<double>();
         double qc = config["qc"].get<double>();
         double epsa = config["epsa"].get<double>();
@@ -36,8 +37,9 @@ int main(int argc, char* argv[]) {
         double t_final = config.value("t_final", 0.100); // s
         double q_crit = config.value("q_crit", 0.98);
         double n_e = config.value("n_e", 1.0e20); // m^-3
-        double tau_R = config.value("tau_R", 0.1); // s
+        double alpha_chi = config.value("alpha_chi", 2.0);
         double Tc = 2.0; // keV
+
 
         const double mu0 = 4.0e-7 * 3.14159265;
         const double e_keV = 1.60217663e-16; // J per kev
@@ -52,6 +54,7 @@ int main(int argc, char* argv[]) {
         double h_bar = 1.0 / (1.0 - alpha1 * ft_bar);
         double Bth_a = epsa * B0 / qa;
         double n20 = n_e / 1.0e20;
+
 
         auto lnLambda = [&](double T_keV) { return 15.2 - std::log(std::sqrt(n20) / T_keV); };
         double eta_coef = Z * N_Z * h_bar / (1.96 * 6.0 * std::sqrt(2.0) * std::pow(pi, 1.5)) * std::sqrt(m_e) * e_C * e_C * std::pow(c_light, 4) * mu0 * mu0;
@@ -68,13 +71,13 @@ int main(int argc, char* argv[]) {
         double j_c = epsa * B0 / (mu0 * a); // density scaling
 
 
-        double kappa = (2.0 / 3.0) * chi * t_final;
-        double theta = (2.0 / 3.0) * t_final * eta_c * j_c * j_c / (n_e * e_keV * Tc);
-        double tauR_hat = tau_R / t_final;
+        double kappa = chi * t_final / c_th;
+        double theta = t_final * eta_c * j_c * j_c / (c_th * n_e * e_keV * Tc);
         double dt_hat = dt / t_final;
         double Tedge_hat = 0.05 / Tc;
+        double lam   = t_final * eta_c / (mu0 * a * a);
 
-        Kadomtsev model(qa, qc, Nr, kappa, theta, tauR_hat, Tedge_hat);
+        Kadomtsev model(qa, qc, Nr, kappa, theta, lam, Tedge_hat, alpha_chi);
 
         std::ofstream time_history("time_history.dat");
         if (!time_history.is_open()) {
