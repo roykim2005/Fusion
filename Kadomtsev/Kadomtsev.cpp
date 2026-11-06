@@ -18,9 +18,8 @@ static double psi_root_wrapper(double radial_r, const Kadomtsev* model) {
     return model->eval_psi_diff(radial_r);
 }
 // imports parameters from Kadomtsev.json
-Kadomtsev::Kadomtsev(double qa_val, double qc_val, int Nr_val, double kappa_val, double theta_val, double tauR_hat_val, double Tedge_hat_val)
-    : qc(qc_val), qa(qa_val), Nr(Nr_val), kappa(kappa_val), theta(theta_val),
-      tauR_hat(tauR_hat_val), Tedge_hat(Tedge_hat_val) {
+Kadomtsev::Kadomtsev(double qa_val, double qc_val, int Nr_val, double kappa_val, double theta_val, double lam_val, double Tedge_hat_val, double alpha_chi_val)
+    : qc(qc_val), qa(qa_val), Nr(Nr_val), kappa(kappa_val), theta(theta_val), lam(lam_val), Tedge_hat(Tedge_hat_val), alpha_chi(alpha_chi_val) {
     // sanity check
     validate_inputs();
     mu = qa / qc;
@@ -242,6 +241,13 @@ void Kadomtsev::compute_profiles() {
         B_theta[i] = r[i] / q_pre[i]; // B field
         dpsi_star_dr[i] = (1.0 - q_pre[i]) * B_theta[i];
     }
+
+    f_chi = (1.0 + alpha_chi) / (std::pow(2.0, 1.0 + alpha_chi) - 1.0);
+    chi_half.resize(Nr - 1);
+    for (int i = 0; i < Nr - 1; ++i) {
+        double r_h = r[i] + 0.5 * dr;
+        chi_half[i] = f_chi * std::pow(1.0 + r_h * r_h, alpha_chi);
+    }
 }
 
 
@@ -308,6 +314,7 @@ void Kadomtsev::reset_post_to_pre() {
         eta_pre[i] = eta_post[i];
         B_theta[i] = r[i] / q_pre[i];
     }
+    be_steps_left = 4;
 }
 
 
@@ -339,42 +346,92 @@ static std::vector<double> solve_tridiagonal(const std::vector<double>& A, const
 
 
 void Kadomtsev::step_ramp_phase(double dt) { // dt is dt hat
+    const int n_iter = 2;
     double dr = r[1] - r[0];
+    double w = (be_steps_left > 0) ? 1.0 : 0.5; // 0.5 is CN, 1 is backward euler
+
+
     double alpha = kappa * dt / (dr * dr);
-    std::vector<double> A(Nr, 0.0), B(Nr, 0.0), C(Nr, 0.0), D(Nr, 0.0); B[0] = 1.0; C[0] = -1.0; D[0] = 0.0; // dT/dr = 0 at r=0
 
-    // grid points
-    for (int i = 1; i < Nr - 1; ++i) {
-        double r_minus = r[i] - 0.5 * dr;
-        double r_plus  = r[i] + 0.5 * dr;
+    auto make_eta = [&](const std::vector<double>& T, std::vector<double>& eta) {
+        for (int i = 0; i < Nr; ++i) {
+            double Tf = std::max(Tedge_hat, T[i]);
+            eta[i] = 1.0 / (Tf * std::sqrt(Tf));
+        }
+    };
+        auto make_j = [&](const std::vector<double>& u, std::vector<double>& j) {
+        for (int i = 1; i < Nr - 1; ++i) j[i] = (u[i + 1] - u[i - 1]) / (2.0 * dr * r[i]);
+        j[0] = j[1];
+        j[Nr - 1] = (u[Nr - 1] - u[Nr - 2]) / (dr * r[Nr - 1]);
+    };
 
-        A[i] = -alpha * (r_minus / r[i]);
-        C[i] = -alpha * (r_plus / r[i]);
-        B[i] = 1.0 - A[i] - C[i];
+    // initial timestep
+    std::vector<double> T_old = T_pre, u_old(Nr), eta_old(Nr), j_old(Nr, 0.0), S_old(Nr);
+    for (int i = 0; i < Nr; ++i) u_old[i] = r[i] * B_theta[i];
+    make_eta(T_old, eta_old);
+    make_j(u_old, j_old);
+    for (int i = 0; i < Nr; ++i) S_old[i] = eta_old[i] * j_old[i] * j_old[i];
+
+    // next step, one before is the first guess
+    std::vector<double> T_new = T_old, u_new = u_old, eta_new = eta_old, j_new = j_old, S_new = S_old;
+    std::vector<double> eta_w(Nr), S_w(Nr);
+
+    for (int it = 0; it < n_iter; ++it) {
+        for (int i = 0; i < Nr; ++i) {
+            eta_w[i] = (1.0 - w) * eta_old[i] + w * eta_new[i];
+            S_w[i]   = (1.0 - w) * S_old[i]   + w * S_new[i];
+        }
         
-        double dq_dr = (q_pre[i + 1] - q_pre[i - 1]) / (2.0 * dr);
-        double j_hat = (2.0 - r[i] * dq_dr / q_pre[i]) / q_pre[i];
-        double eta_hat = std::pow(std::max(Tedge_hat, T_pre[i]), -1.5);
+        // temp
+        std::vector<double> A(Nr, 0.0), B(Nr, 1.0), C(Nr, 0.0), D(T_old);
+        B[0] = 1.0; C[0] = -1.0; D[0] = 0.0;
+        for (int i = 1; i < Nr - 1; ++i) {
+            double r_m = r[i] - 0.5 * dr, r_p = r[i] + 0.5 * dr;
+            double chi_m = chi_half[i - 1], chi_p = chi_half[i];
+            A[i] = -w * alpha * chi_m * r_m / r[i];
+            C[i] = -w * alpha * chi_p * r_p / r[i];
+            B[i] = 1.0 - A[i] - C[i];
+            double lap = (chi_p * r_p / r[i]) * (T_old[i + 1] - T_old[i])
+                       - (chi_m * r_m / r[i]) * (T_old[i] - T_old[i - 1]);
+            D[i] = T_old[i] + (1.0 - w) * alpha * lap + dt * theta * S_w[i];
+        }
+        D[Nr - 1] = Tedge_hat;
+        T_new = solve_tridiagonal(A, B, C, D);
+        for (int i = 0; i < Nr; ++i) T_new[i] = std::max(Tedge_hat, T_new[i]);
 
-        D[i] = T_pre[i] + dt * theta * eta_hat * j_hat * j_hat;
-        // diffusion 
+        // let u = rB_theta, jhat = 1/r du/dr
+        std::vector<double> Au(Nr, 0.0), Bu(Nr, 1.0), Cu(Nr, 0.0), Du(u_old);
+        for (int i = 1; i < Nr - 1; ++i) {
+            double r_m = r[i] - 0.5 * dr, r_p = r[i] + 0.5 * dr;
+            double eta_m = 0.5 * (eta_w[i] + eta_w[i - 1]);
+            double eta_p = 0.5 * (eta_w[i] + eta_w[i + 1]);
+            double beta = lam * dt * r[i] / (dr * dr);
+            Au[i] = -w * beta * eta_m / r_m;
+            Cu[i] = -w * beta * eta_p / r_p;
+            Bu[i] = 1.0 - Au[i] - Cu[i];
+            Du[i] = u_old[i] + (1.0 - w) * beta * (eta_p * (u_old[i + 1] - u_old[i]) / r_p - eta_m * (u_old[i] - u_old[i - 1]) / r_m);
+        }
+        Du[0] = 0.0; // u(0)=0.
+        u_new = solve_tridiagonal(Au, Bu, Cu, Du);
+
+        // new coeff
+        make_eta(T_new, eta_new);
+        make_j(u_new, j_new);
+        for (int i = 0; i < Nr; ++i) S_new[i] = eta_new[i] * j_new[i] * j_new[i];
     }
 
-    // Boundary at r = a - T_edge is fixed
-    B[Nr - 1] = 1.0; 
-    D[Nr - 1] = Tedge_hat; 
-
-    // solves for T^(n+1)
-    T_pre = solve_tridiagonal(A, B, C, D);
-
-    // resistivity profile for new temp
+    T_pre = T_new;
+    for (int i = 1; i < Nr; ++i) {
+        B_theta[i] = u_new[i] / r[i];
+        q_pre[i] = r[i] / B_theta[i];
+    }
+    q_pre[0] = q_pre[1] - (q_pre[2] - q_pre[1]) * (r[1]*r[1] - r[0]*r[0]) / (r[2]*r[2] - r[1]*r[1]);
+    B_theta[0] = r[0] / q_pre[0];
     for (int i = 0; i < Nr; ++i) {
-        T_pre[i] = std::max(Tedge_hat, T_pre[i]);
-        eta_pre[i] = std::pow(T_pre[i], -1.5);
-        double q_target = qc + (qa - qc) * r[i] * r[i];
-        q_pre[i] += dt * (q_target - q_pre[i]) / tauR_hat;
-        B_theta[i] = r[i] / q_pre[i];
+        double Tf = T_pre[i];
+        eta_pre[i] = 1.0 / (Tf * std::sqrt(Tf));
     }
+    if (be_steps_left > 0) --be_steps_left;
 }
 
 void Kadomtsev::print_summary() const {
