@@ -93,8 +93,7 @@ double Kadomtsev::find_root_bisection(double (*func)(double, const Kadomtsev*), 
     double f_high = func(high, this);
 
     if (f_low * f_high > 0.0) {
-        throw std::runtime_error("Root not in interval [" + 
-                                 std::to_string(low) + ", " + std::to_string(high) + "].");
+        throw std::runtime_error("Root not in interval [" +  std::to_string(low) + ", " + std::to_string(high) + "].");
     }
 
     double mid = low;
