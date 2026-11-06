@@ -16,8 +16,10 @@ private:
     double mu; // Current profile exponent
     double kappa; // diffusion term, (2.0 / 3.0) * chi * t_final
     double theta; // ohm heating term, (2.0 / 3.0) * t_final * eta_c * J_c * J_c / (n_e * e_keV * Tc);
-    double tauR_hat; // tau_R / t_final
+    double lam; // tau_R / t_final
     double Tedge_hat; // edge tempe / Tc
+    double alpha_chi; // chi hat exponent
+    double f_chi; // (1 + alpha)/(2^(1+alpha) - 1)
 
 
     std::vector<double> r; // Normalized radial coordinate r = r/a in [0, 1]
@@ -31,10 +33,12 @@ private:
     std::vector<double> T_post; // Post-crash mixed temperature profile
     std::vector<double> eta_pre; // Pre-crash Spitzer resistivity
     std::vector<double> eta_post; // Post-crash Spitzer resistivity
+    std::vector<double> chi_half; // chi hat at r_i + dr/2
 
     double r1; // Resonant q=1 surface radius (r1 / a)
     double r0; // Boundary radius (r0 / a)
     double current_time{0.0}; // for time evolution
+    int be_steps_left{0}; // backward euler 
 
 
     void validate_inputs() const;
@@ -49,7 +53,7 @@ private:
     void compute_temperature_and_resistivity();
 
 public:
-    Kadomtsev(double qa_val, double qc_val, int Nr_val, double kappa_val, double theta_val, double tauR_hat_val, double Tedge_hat_val);
+    Kadomtsev(double qa_val, double qc_val, int Nr_val, double kappa_val, double theta_val, double lam_val, double Tedge_hat_val, double alpha_chi_val);
 
     void solve();
     void print_summary() const;
