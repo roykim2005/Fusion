@@ -192,9 +192,12 @@ void Kadomtsev::compute_temperature_and_resistivity() {
         double T1 = interpolate_1d(r, T_pre, r1_minus);
         double T2 = interpolate_1d(r, T_pre, r2_plus);
 
-        // temp relaxation
-        double denom = r1_minus * dr1_dr2 + r2_plus;
-        double T_mix = (denom > 1e-9) ? ((T1 * r1_minus * dr1_dr2 + T2 * r2_plus) / denom) : T1; // use average, find how q is modified after crash
+        double n1 = interpolate_1d(r, n_i, r1_minus);
+        double n2 = interpolate_1d(r, n_i, r2_plus);
+        double w1 = n1 * r1_minus * dr1_dr2;
+        double w2 = n2 * r2_plus;
+        double denom = w1 + w2;
+        double T_mix = (denom > 1e-9) ? (T1 * w1 + T2 * w2) / denom : T1; // n hat weighted temp relaxation
 
         r_post_list.push_back(r_post);
         T_mix_list.push_back(T_mix);
