@@ -518,7 +518,7 @@ void Kadomtsev::write_data(const std::string& filename) const {
 }
 
 
-// suggestion: first timestep, i should see something reasonable and nothing crazy. Boundary condition for triangular matrix. make sure i have bc right. 
+// suggestion: first timestep, i should see something reasonable and nothing crazy. Boundary condition for tri matrix. make sure i have bc right. 
 // near axis, do finite difference. USe crank nicholson and you end up with tridiagonal. 
 
 // plot T vs r and q vs r, differnt stages of crash
