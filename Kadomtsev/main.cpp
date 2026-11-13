@@ -39,7 +39,10 @@ int main(int argc, char* argv[]) {
         double n_e = config.value("n_e", 1.0e20); // m^-3
         double alpha_chi = config.value("alpha_chi", 2.0);
         double Tc = 2.0; // keV
-
+        double n_exp = config.value("n_exp", 1.0); 
+        double xi = config.value("xi", 0.5); 
+        double Ip_ratio = config.value("Ip_ratio", 1.0);
+        double t_ramp = config.value("t_ramp", 1.0);
 
         const double mu0 = 4.0e-7 * 3.14159265;
         const double e_keV = 1.60217663e-16; // J per kev
@@ -67,6 +70,7 @@ int main(int argc, char* argv[]) {
             if (done) break;
         }
         double eta_c = eta_coef * lnLambda(Tc) * std::pow(Tc * e_keV, -1.5);
+        double lnLam_c = lnLambda(Tc); // at n_0, Tc
 
         double j_c = epsa * B0 / (mu0 * a); // density scaling
 
@@ -77,7 +81,7 @@ int main(int argc, char* argv[]) {
         double Tedge_hat = 0.05 / Tc;
         double lam   = t_final * eta_c / (mu0 * a * a);
 
-        Kadomtsev model(qa, qc, Nr, kappa, theta, lam, Tedge_hat, alpha_chi);
+        Kadomtsev model(qa, qc, Nr, kappa, theta, lam, Tedge_hat, alpha_chi, n_exp, xi, lnLam_c, Ip_ratio, t_ramp);
 
         std::ofstream time_history("time_history.dat");
         if (!time_history.is_open()) {
