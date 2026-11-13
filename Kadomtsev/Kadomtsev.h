@@ -14,12 +14,21 @@ private:
     double qa; // Edge safety factor (q(r) at r=a)
     int Nr; // radial grid resolution
     double mu; // Current profile exponent
-    double kappa; // diffusion term, (2.0 / 3.0) * chi * t_final
+    double kappa; // diffusion term, chi_0 * t_final
     double theta; // ohm heating term, (2.0 / 3.0) * t_final * eta_c * J_c * J_c / (n_e * e_keV * Tc);
     double lam; // tau_R / t_final
     double Tedge_hat; // edge tempe / Tc
     double alpha_chi; // chi hat exponent
     double f_chi; // (1 + alpha)/(2^(1+alpha) - 1)
+    double n_exp; 
+    double xi_n; 
+    double lnLam_c; 
+    double eta_hat_of(double T_hat, double n_hat) const;
+    double Ip0_hat; // B_theta at r/a
+    double Ip_ratio; 
+    double t_ramp;
+    double n0_hat(double t) const;
+    double dln_n0_dt(double t) const;
 
 
     std::vector<double> r; // Normalized radial coordinate r = r/a in [0, 1]
@@ -33,7 +42,9 @@ private:
     std::vector<double> T_post; // Post-crash mixed temperature profile
     std::vector<double> eta_pre; // Pre-crash Spitzer resistivity
     std::vector<double> eta_post; // Post-crash Spitzer resistivity
-    std::vector<double> chi_half; // chi hat at r_i + dr/2
+    std::vector<double> chi_half; // chi hat at r_i + dr/2 
+    std::vector<double> n_i; // n hat at r_i
+    std::vector<double> n_half; // n hat at r_i + dr/2
 
     double r1; // Resonant q=1 surface radius (r1 / a)
     double r0; // Boundary radius (r0 / a)
@@ -53,7 +64,7 @@ private:
     void compute_temperature_and_resistivity();
 
 public:
-    Kadomtsev(double qa_val, double qc_val, int Nr_val, double kappa_val, double theta_val, double lam_val, double Tedge_hat_val, double alpha_chi_val);
+    Kadomtsev(double qa_val, double qc_val, int Nr_val, double kappa_val, double theta_val, double lam_val, double Tedge_hat_val, double alpha_chi_val, double n_exp_val, double xi_n_val, double lnLam_c_val, double Ip_ratio_val, double t_ramp_val);
 
     void solve();
     void print_summary() const;
