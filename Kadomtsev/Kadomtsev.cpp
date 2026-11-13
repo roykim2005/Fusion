@@ -18,14 +18,30 @@ static double psi_root_wrapper(double radial_r, const Kadomtsev* model) {
     return model->eval_psi_diff(radial_r);
 }
 // imports parameters from Kadomtsev.json
-Kadomtsev::Kadomtsev(double qa_val, double qc_val, int Nr_val, double kappa_val, double theta_val, double lam_val, double Tedge_hat_val, double alpha_chi_val)
-    : qc(qc_val), qa(qa_val), Nr(Nr_val), kappa(kappa_val), theta(theta_val), lam(lam_val), Tedge_hat(Tedge_hat_val), alpha_chi(alpha_chi_val) {
+Kadomtsev::Kadomtsev(double qa_val, double qc_val, int Nr_val, double kappa_val, double theta_val, double lam_val, double Tedge_hat_val, double alpha_chi_val, double n_exp_val, double xi_n_val, double lnLam_c_val, double Ip_ratio_val, double t_ramp_val)
+    : qc(qc_val), qa(qa_val), Nr(Nr_val), kappa(kappa_val), theta(theta_val), lam(lam_val), Tedge_hat(Tedge_hat_val), alpha_chi(alpha_chi_val), n_exp(n_exp_val), xi_n(xi_n_val), lnLam_c(lnLam_c_val), Ip_ratio(Ip_ratio_val), t_ramp(t_ramp_val) {
     // sanity check
     validate_inputs();
     mu = qa / qc;
     // resizes arrays std::vector for Nr points for r, pre q, post q, B0, p, psi.
     allocate_memory();
     compute_profiles();
+}
+
+double Kadomtsev::n0_hat(double t) const {
+    double s = (t_ramp > 0.0) ? std::min(t / t_ramp, 1.0) : 1.0;
+    return 1.0 + (Ip_ratio - 1.0) * s;
+}
+
+double Kadomtsev::dln_n0_dt(double t) const {
+    if (t_ramp <= 0.0 || t >= t_ramp) return 0.0;
+    return (Ip_ratio - 1.0) / t_ramp / n0_hat(t);
+}
+
+double Kadomtsev::eta_hat_of(double T_hat, double n_hat) const {
+    double Tf = std::max(Tedge_hat, T_hat);
+    double lnL_ratio = 1.0 + (std::log(Tf) - 0.5 * std::log(n_hat)) / lnLam_c;
+    return lnL_ratio / (Tf * std::sqrt(Tf));
 }
 
 void Kadomtsev::validate_inputs() const {
@@ -37,6 +53,12 @@ void Kadomtsev::validate_inputs() const {
     }
     if (qc >= 1.0) {
         throw std::domain_error("qc is already at equilibrium.");
+    }
+    if (n_exp < 1.0) {
+        throw std::domain_error("n_exp must be at least 1.0.");
+    }
+    if (xi_n > 1.0 || xi_n < 0.0) {
+        throw std::domain_error("xi_n must be within 0 and 1.");
     }
 }
 
@@ -55,9 +77,7 @@ void Kadomtsev::allocate_memory() {
 }
 
 // 1D interpolation function
-double interpolate_1d(const std::vector<double>& x_vals, 
-                       const std::vector<double>& y_vals, 
-                       double x_target) 
+double interpolate_1d(const std::vector<double>& x_vals, const std::vector<double>& y_vals, double x_target) 
 {
     if (x_vals.empty()) return 0.0;
     if (x_target <= x_vals.front()) return y_vals.front();
@@ -219,7 +239,7 @@ void Kadomtsev::compute_temperature_and_resistivity() {
         T_post[idx_r0] = T_pre[idx_r0];
 
         // new resistivity
-        eta_post[i] = std::pow(std::max(Tedge_hat, T_post[i]), -1.5);
+        eta_post[i] = eta_hat_of(T_post[i], n0_hat(current_time) * n_i[i]);
     }
     
 }
@@ -247,6 +267,14 @@ void Kadomtsev::compute_profiles() {
         double r_h = r[i] + 0.5 * dr;
         chi_half[i] = f_chi * std::pow(1.0 + r_h * r_h, alpha_chi);
     }
+
+    auto nhat = [&](double x) {
+        return (1.0 - xi_n) * std::pow(std::max(0.0, 1.0 - x * x), n_exp) + xi_n;
+    };
+    n_i.resize(Nr);
+    n_half.resize(Nr - 1);
+    for (int i = 0; i < Nr; ++i) n_i[i] = nhat(r[i]);
+    for (int i = 0; i < Nr - 1; ++i) n_half[i] = nhat(r[i] + 0.5 * dr);
 }
 
 
@@ -348,15 +376,14 @@ void Kadomtsev::step_ramp_phase(double dt) { // dt is dt hat
     const int n_iter = 2;
     double dr = r[1] - r[0];
     double w = (be_steps_left > 0) ? 1.0 : 0.5; // 0.5 is CN, 1 is backward euler
-
+    double t0 = current_time, t_mid = t0 + 0.5 * dt, t_new = t0 + dt;
+    double n0_old = n0_hat(t0), n0_new = n0_hat(t_new), n0_mid = n0_hat(t_mid);
+    double gam = dln_n0_dt(t_mid);
 
     double alpha = kappa * dt / (dr * dr);
 
-    auto make_eta = [&](const std::vector<double>& T, std::vector<double>& eta) {
-        for (int i = 0; i < Nr; ++i) {
-            double Tf = std::max(Tedge_hat, T[i]);
-            eta[i] = 1.0 / (Tf * std::sqrt(Tf));
-        }
+    auto make_eta = [&](const std::vector<double>& T, std::vector<double>& eta, double n0) {
+        for (int i = 0; i < Nr; ++i) eta[i] = eta_hat_of(T[i], n0 * n_i[i]);
     };
         auto make_j = [&](const std::vector<double>& u, std::vector<double>& j) {
         for (int i = 1; i < Nr - 1; ++i) j[i] = (u[i + 1] - u[i - 1]) / (2.0 * dr * r[i]);
@@ -367,7 +394,7 @@ void Kadomtsev::step_ramp_phase(double dt) { // dt is dt hat
     // initial timestep
     std::vector<double> T_old = T_pre, u_old(Nr), eta_old(Nr), j_old(Nr, 0.0), S_old(Nr);
     for (int i = 0; i < Nr; ++i) u_old[i] = r[i] * B_theta[i];
-    make_eta(T_old, eta_old);
+    make_eta(T_old, eta_old, n0_old);
     make_j(u_old, j_old);
     for (int i = 0; i < Nr; ++i) S_old[i] = eta_old[i] * j_old[i] * j_old[i];
 
@@ -386,19 +413,20 @@ void Kadomtsev::step_ramp_phase(double dt) { // dt is dt hat
         B[0] = 1.0; C[0] = -1.0; D[0] = 0.0;
         for (int i = 1; i < Nr - 1; ++i) {
             double r_m = r[i] - 0.5 * dr, r_p = r[i] + 0.5 * dr;
-            double chi_m = chi_half[i - 1], chi_p = chi_half[i];
-            A[i] = -w * alpha * chi_m * r_m / r[i];
-            C[i] = -w * alpha * chi_p * r_p / r[i];
-            B[i] = 1.0 - A[i] - C[i];
-            double lap = (chi_p * r_p / r[i]) * (T_old[i + 1] - T_old[i])
-                       - (chi_m * r_m / r[i]) * (T_old[i] - T_old[i - 1]);
-            D[i] = T_old[i] + (1.0 - w) * alpha * lap + dt * theta * S_w[i];
+            double chi_m = chi_half[i - 1] * n_half[i - 1];
+            double chi_p = chi_half[i] * n_half[i];
+            double inv_n = 1.0 / n_i[i];
+            A[i] = -w * alpha * chi_m * r_m / r[i] * inv_n;
+            C[i] = -w * alpha * chi_p * r_p / r[i] * inv_n;
+            B[i] = 1.0 - A[i] - C[i] + w * dt * gam;
+            double lap = ((chi_p * r_p / r[i]) * (T_old[i + 1] - T_old[i]) - (chi_m * r_m / r[i]) * (T_old[i] - T_old[i - 1])) * inv_n;
+            D[i] = T_old[i] + (1.0 - w) * (alpha * lap - dt * gam * T_old[i]) + dt * theta * S_w[i] * inv_n / n0_mid;
         }
         D[Nr - 1] = Tedge_hat;
         T_new = solve_tridiagonal(A, B, C, D);
         for (int i = 0; i < Nr; ++i) T_new[i] = std::max(Tedge_hat, T_new[i]);
 
-        // let u = rB_theta, jhat = 1/r du/dr
+        // let u = rB_theta, jhat = 1/r du/dr for convenience
         std::vector<double> Au(Nr, 0.0), Bu(Nr, 1.0), Cu(Nr, 0.0), Du(u_old);
         for (int i = 1; i < Nr - 1; ++i) {
             double r_m = r[i] - 0.5 * dr, r_p = r[i] + 0.5 * dr;
@@ -411,10 +439,11 @@ void Kadomtsev::step_ramp_phase(double dt) { // dt is dt hat
             Du[i] = u_old[i] + (1.0 - w) * beta * (eta_p * (u_old[i + 1] - u_old[i]) / r_p - eta_m * (u_old[i] - u_old[i - 1]) / r_m);
         }
         Du[0] = 0.0; // u(0)=0.
+        Du[Nr - 1] = Ip0_hat * n0_new;
         u_new = solve_tridiagonal(Au, Bu, Cu, Du);
 
         // new coeff
-        make_eta(T_new, eta_new);
+        make_eta(T_new, eta_new, n0_new);
         make_j(u_new, j_new);
         for (int i = 0; i < Nr; ++i) S_new[i] = eta_new[i] * j_new[i] * j_new[i];
     }
@@ -426,12 +455,13 @@ void Kadomtsev::step_ramp_phase(double dt) { // dt is dt hat
     }
     q_pre[0] = q_pre[1] - (q_pre[2] - q_pre[1]) * (r[1]*r[1] - r[0]*r[0]) / (r[2]*r[2] - r[1]*r[1]);
     B_theta[0] = r[0] / q_pre[0];
-    for (int i = 0; i < Nr; ++i) {
-        double Tf = T_pre[i];
-        eta_pre[i] = 1.0 / (Tf * std::sqrt(Tf));
-    }
+    for (int i = 0; i < Nr; ++i) eta_pre[i] = eta_hat_of(T_pre[i], n0_new * n_i[i]);
     if (be_steps_left > 0) --be_steps_left;
 }
+
+
+// q is tilde r^2/u using q(0), eta hat is T hat ^{3/2}. 
+
 
 void Kadomtsev::print_summary() const {
     double q_r0_pre = interpolate(r, q_pre, r0);
@@ -491,3 +521,5 @@ void Kadomtsev::write_data(const std::string& filename) const {
 // plot T vs r and q vs r, differnt stages of crash
 
 // timestep too small, not enough for time evolutions. NORMALIZE EVERYTHING! for timesteps, want D to be 1. 
+
+// try cold plasmas - 11/6/2026. fix dealing with inverse r singularity later. 
